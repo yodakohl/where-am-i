@@ -1,7 +1,10 @@
 use crate::anchors::Anchor;
+use crate::hints::LocationHint;
 use crate::probe::Measurement;
 
 const EARTH_RADIUS_KM: f64 = 6371.0;
+const MIN_KM_PER_MS: f64 = 102.0;
+const MIN_MS_PER_KM: f64 = 1.0 / MIN_KM_PER_MS;
 
 #[derive(Debug, Clone, Copy)]
 pub struct Constraint {
@@ -20,11 +23,24 @@ pub struct EvaluatedConstraint {
 }
 
 #[derive(Debug, Clone)]
+pub struct EvaluatedHint {
+    pub anchor: Anchor,
+    pub weight: f64,
+    pub source: String,
+    pub distance_km: f64,
+}
+
+#[derive(Debug, Clone)]
 pub struct Estimate {
     pub latitude: f64,
     pub longitude: f64,
     pub score: f64,
+    pub fitted_overhead_ms: f64,
+    pub fitted_km_per_ms: f64,
+    pub weighted_rmse_ms: f64,
+    pub confidence_radius_km: f64,
     pub constraints: Vec<EvaluatedConstraint>,
+    pub hints: Vec<EvaluatedHint>,
 }
 
 pub fn constraints_from_measurements(
@@ -43,24 +59,65 @@ pub fn constraints_from_measurements(
         .collect()
 }
 
-pub fn solve(constraints: &[Constraint]) -> Option<Estimate> {
+pub fn solve(
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    shared_rtt_floor_ms: f64,
+) -> Option<Estimate> {
+    let best = solve_once(constraints, hints, shared_rtt_floor_ms)?;
+    let confidence_radius_km = stability_radius_km(best, constraints, hints, shared_rtt_floor_ms);
+
+    Some(build_estimate(
+        best,
+        constraints,
+        hints,
+        confidence_radius_km,
+    ))
+}
+
+fn solve_once(
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    shared_rtt_floor_ms: f64,
+) -> Option<Candidate> {
     if constraints.is_empty() {
         return None;
     }
 
     let mut best = initial_candidates(constraints)
         .into_iter()
-        .map(|(lat, lon)| candidate(lat, lon, constraints))
+        .map(|(lat, lon)| candidate(lat, lon, constraints, hints, shared_rtt_floor_ms))
         .min_by(|left, right| left.score.total_cmp(&right.score))?;
 
-    for step in [8.0, 2.0, 0.5, 0.1, 0.02] {
-        best = refine(best.latitude, best.longitude, step, constraints, best.score);
+    for step in [8.0, 2.0, 0.5, 0.1, 0.02, 0.005, 0.001] {
+        best = refine(
+            best.latitude,
+            best.longitude,
+            step,
+            constraints,
+            hints,
+            shared_rtt_floor_ms,
+            best.score,
+        );
     }
 
-    Some(Estimate {
+    Some(best)
+}
+
+fn build_estimate(
+    best: Candidate,
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    confidence_radius_km: f64,
+) -> Estimate {
+    Estimate {
         latitude: best.latitude,
         longitude: best.longitude,
         score: best.score,
+        fitted_overhead_ms: best.fit.overhead_ms,
+        fitted_km_per_ms: 1.0 / best.fit.ms_per_km,
+        weighted_rmse_ms: best.fit.weighted_rmse_ms,
+        confidence_radius_km,
         constraints: constraints
             .iter()
             .map(|constraint| {
@@ -79,7 +136,21 @@ pub fn solve(constraints: &[Constraint]) -> Option<Estimate> {
                 }
             })
             .collect(),
-    })
+        hints: hints
+            .iter()
+            .map(|hint| EvaluatedHint {
+                anchor: hint.anchor,
+                weight: hint.weight,
+                source: hint.source.clone(),
+                distance_km: haversine_km(
+                    best.latitude,
+                    best.longitude,
+                    hint.anchor.latitude,
+                    hint.anchor.longitude,
+                ),
+            })
+            .collect(),
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -87,6 +158,14 @@ struct Candidate {
     latitude: f64,
     longitude: f64,
     score: f64,
+    fit: LatencyFit,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct LatencyFit {
+    overhead_ms: f64,
+    ms_per_km: f64,
+    weighted_rmse_ms: f64,
 }
 
 fn initial_candidates(constraints: &[Constraint]) -> Vec<(f64, f64)> {
@@ -141,19 +220,23 @@ fn refine(
     longitude: f64,
     step: f64,
     constraints: &[Constraint],
+    hints: &[LocationHint],
+    shared_rtt_floor_ms: f64,
     current_score: f64,
 ) -> Candidate {
+    let fit = fit_latency_model(latitude, longitude, constraints);
     let mut best = Candidate {
         latitude,
         longitude,
         score: current_score,
+        fit,
     };
 
     for lat_step in -8..=8 {
         for lon_step in -8..=8 {
             let next_lat = clamp_latitude(latitude + f64::from(lat_step) * step);
             let next_lon = normalize_longitude(longitude + f64::from(lon_step) * step);
-            let candidate = candidate(next_lat, next_lon, constraints);
+            let candidate = candidate(next_lat, next_lon, constraints, hints, shared_rtt_floor_ms);
             if candidate.score < best.score {
                 best = candidate;
             }
@@ -163,16 +246,38 @@ fn refine(
     best
 }
 
-fn candidate(latitude: f64, longitude: f64, constraints: &[Constraint]) -> Candidate {
+fn candidate(
+    latitude: f64,
+    longitude: f64,
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    shared_rtt_floor_ms: f64,
+) -> Candidate {
+    let fit = fit_latency_model(latitude, longitude, constraints);
     Candidate {
         latitude,
         longitude,
-        score: objective(latitude, longitude, constraints),
+        score: objective(
+            latitude,
+            longitude,
+            constraints,
+            hints,
+            fit,
+            shared_rtt_floor_ms,
+        ),
+        fit,
     }
 }
 
-fn objective(latitude: f64, longitude: f64, constraints: &[Constraint]) -> f64 {
-    constraints
+fn objective(
+    latitude: f64,
+    longitude: f64,
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    fit: LatencyFit,
+    shared_rtt_floor_ms: f64,
+) -> f64 {
+    let upper_bound_score: f64 = constraints
         .iter()
         .map(|constraint| {
             let distance_km = haversine_km(
@@ -183,11 +288,254 @@ fn objective(latitude: f64, longitude: f64, constraints: &[Constraint]) -> f64 {
             );
             let overflow_km = (distance_km - constraint.upper_bound_km).max(0.0);
             let scale = constraint.upper_bound_km.max(100.0);
-            let overflow_penalty = 500.0 * (overflow_km / scale).powi(2);
-            let attraction = 25.0 * distance_km / scale.powf(1.25);
-            overflow_penalty + attraction
+            1000.0 * (overflow_km / scale).powi(2)
+        })
+        .sum();
+
+    let hint_score: f64 = hints
+        .iter()
+        .map(|hint| {
+            let distance_km = haversine_km(
+                latitude,
+                longitude,
+                hint.anchor.latitude,
+                hint.anchor.longitude,
+            );
+            hint.weight * distance_km / 150.0
+        })
+        .sum();
+
+    let dominant_anchor_score =
+        dominant_local_anchor_score(latitude, longitude, constraints, shared_rtt_floor_ms);
+    let relative_spread_score = relative_spread_score(latitude, longitude, constraints);
+
+    let fit_penalty = 80.0 * fit.weighted_rmse_ms
+        + 0.5 * fit.overhead_ms
+        + 2000.0 * (fit.ms_per_km - MIN_MS_PER_KM).max(0.0);
+
+    upper_bound_score + fit_penalty + hint_score + dominant_anchor_score + relative_spread_score
+}
+
+fn dominant_local_anchor_score(
+    latitude: f64,
+    longitude: f64,
+    constraints: &[Constraint],
+    shared_rtt_floor_ms: f64,
+) -> f64 {
+    if shared_rtt_floor_ms <= 0.0 || constraints.len() < 2 {
+        return 0.0;
+    }
+
+    let mut ranked = constraints.iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.min_rtt_ms.total_cmp(&right.min_rtt_ms));
+
+    let fastest = ranked[0];
+    let second_fastest = ranked[1];
+    let dominance_ratio = second_fastest.min_rtt_ms / fastest.min_rtt_ms.max(0.1);
+
+    if fastest.min_rtt_ms > 10.0 || dominance_ratio < 3.0 {
+        return 0.0;
+    }
+
+    let soft_radius_km =
+        ((fastest.min_rtt_ms - shared_rtt_floor_ms).max(0.0) * MIN_KM_PER_MS * 0.05)
+            .clamp(5.0, fastest.upper_bound_km.max(5.0));
+    let distance_km = haversine_km(
+        latitude,
+        longitude,
+        fastest.anchor.latitude,
+        fastest.anchor.longitude,
+    );
+    let overflow_km = (distance_km - soft_radius_km).max(0.0);
+    let strength = ((dominance_ratio - 3.0) / 3.0).clamp(0.0, 2.0)
+        + if fastest.min_rtt_ms <= 2.0 { 1.0 } else { 0.0 };
+
+    60.0 * strength * (overflow_km / soft_radius_km.max(10.0)).powi(2)
+}
+
+fn relative_spread_score(latitude: f64, longitude: f64, constraints: &[Constraint]) -> f64 {
+    if constraints.len() < 2 {
+        return 0.0;
+    }
+
+    let mut ranked = constraints.iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.min_rtt_ms.total_cmp(&right.min_rtt_ms));
+
+    let fastest = ranked[0];
+    if fastest.min_rtt_ms > 10.0 {
+        return 0.0;
+    }
+
+    let fastest_distance_km = haversine_km(
+        latitude,
+        longitude,
+        fastest.anchor.latitude,
+        fastest.anchor.longitude,
+    );
+
+    ranked
+        .into_iter()
+        .skip(1)
+        .take(4)
+        .filter(|constraint| constraint.min_rtt_ms <= 50.0)
+        .map(|constraint| {
+            let delta_rtt_ms = constraint.min_rtt_ms - fastest.min_rtt_ms;
+            if delta_rtt_ms < 2.0 {
+                return 0.0;
+            }
+
+            let observed_delta_km = delta_rtt_ms * MIN_KM_PER_MS;
+            let minimum_spread_km = (observed_delta_km * 0.30 - 20.0).max(0.0);
+            if minimum_spread_km <= 0.0 {
+                return 0.0;
+            }
+
+            let distance_km = haversine_km(
+                latitude,
+                longitude,
+                constraint.anchor.latitude,
+                constraint.anchor.longitude,
+            );
+            let predicted_spread_km = (distance_km - fastest_distance_km).max(0.0);
+            let deficit_km = (minimum_spread_km - predicted_spread_km).max(0.0);
+            let weight = (delta_rtt_ms / 10.0).clamp(0.5, 2.0);
+
+            45.0 * weight * (deficit_km / minimum_spread_km.max(100.0)).powi(2)
         })
         .sum()
+}
+
+fn stability_radius_km(
+    best: Candidate,
+    constraints: &[Constraint],
+    hints: &[LocationHint],
+    shared_rtt_floor_ms: f64,
+) -> f64 {
+    let subsets = stability_subsets(constraints);
+    let mut distances = subsets
+        .into_iter()
+        .filter_map(|subset| solve_once(&subset, hints, shared_rtt_floor_ms))
+        .map(|candidate| {
+            haversine_km(
+                best.latitude,
+                best.longitude,
+                candidate.latitude,
+                candidate.longitude,
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if distances.is_empty() {
+        return 0.0;
+    }
+
+    distances.sort_by(|left, right| left.total_cmp(right));
+    let index = ((distances.len() - 1) * 3) / 4;
+    distances[index]
+}
+
+fn stability_subsets(constraints: &[Constraint]) -> Vec<Vec<Constraint>> {
+    let mut ranked = constraints.to_vec();
+    ranked.sort_by(|left, right| left.min_rtt_ms.total_cmp(&right.min_rtt_ms));
+
+    let mut subsets = Vec::new();
+
+    for count in [4_usize, 5, 6, 8] {
+        if ranked.len() >= count {
+            subsets.push(ranked[..count].to_vec());
+        }
+    }
+
+    let leave_one_out = ranked.len().min(4);
+    for drop_index in 0..leave_one_out {
+        let mut subset = ranked.clone();
+        subset.remove(drop_index);
+        if subset.len() >= 3 {
+            subsets.push(subset);
+        }
+    }
+
+    subsets
+}
+
+fn fit_latency_model(latitude: f64, longitude: f64, constraints: &[Constraint]) -> LatencyFit {
+    let mut samples = constraints
+        .iter()
+        .map(|constraint| {
+            let distance_km = haversine_km(
+                latitude,
+                longitude,
+                constraint.anchor.latitude,
+                constraint.anchor.longitude,
+            );
+            (constraint, distance_km)
+        })
+        .collect::<Vec<_>>();
+    samples.sort_by(|left, right| left.0.min_rtt_ms.total_cmp(&right.0.min_rtt_ms));
+    let fit_sample_count = samples.len().min(6);
+    let fit_samples = &samples[..fit_sample_count];
+
+    let mut sum_w = 0.0;
+    let mut sum_x = 0.0;
+    let mut sum_y = 0.0;
+    let mut sum_xx = 0.0;
+    let mut sum_xy = 0.0;
+    let mut distances = Vec::with_capacity(fit_samples.len());
+
+    for (constraint, distance_km) in fit_samples.iter().copied() {
+        let weight = 1.0 / constraint.min_rtt_ms.max(5.0).powi(2);
+        distances.push(distance_km);
+        sum_w += weight;
+        sum_x += weight * distance_km;
+        sum_y += weight * constraint.min_rtt_ms;
+        sum_xx += weight * distance_km * distance_km;
+        sum_xy += weight * distance_km * constraint.min_rtt_ms;
+    }
+
+    if sum_w == 0.0 {
+        return LatencyFit {
+            overhead_ms: 0.0,
+            ms_per_km: MIN_MS_PER_KM,
+            weighted_rmse_ms: 0.0,
+        };
+    }
+
+    let denom = sum_w * sum_xx - sum_x * sum_x;
+    let mut ms_per_km = if denom.abs() > f64::EPSILON {
+        (sum_w * sum_xy - sum_x * sum_y) / denom
+    } else {
+        MIN_MS_PER_KM
+    };
+    ms_per_km = ms_per_km.max(MIN_MS_PER_KM);
+
+    // Refit overhead after clamping to keep the predicted curve as close as possible.
+    let overhead_ms = fit_samples
+        .iter()
+        .zip(distances.iter().copied())
+        .map(|((constraint, _), distance_km)| {
+            let weight = 1.0 / constraint.min_rtt_ms.max(5.0).powi(2);
+            weight * (constraint.min_rtt_ms - ms_per_km * distance_km)
+        })
+        .sum::<f64>()
+        / sum_w;
+    let overhead_ms = overhead_ms.max(0.0);
+
+    let weighted_mse = fit_samples
+        .iter()
+        .zip(distances.iter().copied())
+        .map(|((constraint, _), distance_km)| {
+            let weight = 1.0 / constraint.min_rtt_ms.max(5.0).powi(2);
+            let predicted = overhead_ms + ms_per_km * distance_km;
+            weight * (predicted - constraint.min_rtt_ms).powi(2)
+        })
+        .sum::<f64>()
+        / sum_w;
+
+    LatencyFit {
+        overhead_ms,
+        ms_per_km,
+        weighted_rmse_ms: weighted_mse.sqrt(),
+    }
 }
 
 fn clamp_latitude(latitude: f64) -> f64 {
@@ -250,7 +598,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        let estimate = solve(&constraints).expect("estimate should exist");
+        let estimate = solve(&constraints, &[], 0.0).expect("estimate should exist");
         let error_km = haversine_km(
             estimate.latitude,
             estimate.longitude,
@@ -259,5 +607,86 @@ mod tests {
         );
 
         assert!(error_km < 250.0, "error_km={error_km}");
+    }
+
+    #[test]
+    fn hints_can_break_ties_toward_the_right_metro() {
+        let constraints = vec![
+            Constraint {
+                anchor: BUILTIN_ANCHORS[0],
+                upper_bound_km: 400.0,
+                min_rtt_ms: 4.0,
+            },
+            Constraint {
+                anchor: BUILTIN_ANCHORS[1],
+                upper_bound_km: 400.0,
+                min_rtt_ms: 4.0,
+            },
+        ];
+        let hints = vec![LocationHint {
+            anchor: BUILTIN_ANCHORS[0],
+            weight: 8.0,
+            source: "trace hop".to_string(),
+        }];
+
+        let estimate = solve(&constraints, &hints, 0.0).expect("estimate should exist");
+        let frankfurt_distance = haversine_km(
+            estimate.latitude,
+            estimate.longitude,
+            BUILTIN_ANCHORS[0].latitude,
+            BUILTIN_ANCHORS[0].longitude,
+        );
+        let zurich_distance = haversine_km(
+            estimate.latitude,
+            estimate.longitude,
+            BUILTIN_ANCHORS[1].latitude,
+            BUILTIN_ANCHORS[1].longitude,
+        );
+
+        assert!(frankfurt_distance < zurich_distance);
+    }
+
+    #[test]
+    fn dominant_anchor_prior_pulls_estimate_toward_local_metro() {
+        let constraints = vec![
+            Constraint {
+                anchor: BUILTIN_ANCHORS[0],
+                upper_bound_km: 53.0,
+                min_rtt_ms: 0.52,
+            },
+            Constraint {
+                anchor: BUILTIN_ANCHORS[1],
+                upper_bound_km: 689.0,
+                min_rtt_ms: 6.75,
+            },
+            Constraint {
+                anchor: BUILTIN_ANCHORS[2],
+                upper_bound_km: 1017.0,
+                min_rtt_ms: 9.97,
+            },
+            Constraint {
+                anchor: BUILTIN_ANCHORS[5],
+                upper_bound_km: 1379.0,
+                min_rtt_ms: 13.52,
+            },
+        ];
+
+        let raw_estimate = solve(&constraints, &[], 0.0).expect("raw estimate should exist");
+        let guided_estimate = solve(&constraints, &[], 0.26).expect("guided estimate should exist");
+
+        let raw_distance = haversine_km(
+            raw_estimate.latitude,
+            raw_estimate.longitude,
+            BUILTIN_ANCHORS[0].latitude,
+            BUILTIN_ANCHORS[0].longitude,
+        );
+        let guided_distance = haversine_km(
+            guided_estimate.latitude,
+            guided_estimate.longitude,
+            BUILTIN_ANCHORS[0].latitude,
+            BUILTIN_ANCHORS[0].longitude,
+        );
+
+        assert!(guided_distance < raw_distance);
     }
 }

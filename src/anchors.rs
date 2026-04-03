@@ -22,6 +22,13 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: 8.6821,
     },
     Anchor {
+        id: "eu-central-2",
+        host: "ec2.eu-central-2.amazonaws.com",
+        metro: "Zurich",
+        latitude: 47.3769,
+        longitude: 8.5417,
+    },
+    Anchor {
         id: "eu-south-1",
         host: "ec2.eu-south-1.amazonaws.com",
         metro: "Milan",
@@ -29,11 +36,25 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: 9.1900,
     },
     Anchor {
+        id: "eu-south-2",
+        host: "ec2.eu-south-2.amazonaws.com",
+        metro: "Madrid",
+        latitude: 40.4168,
+        longitude: -3.7038,
+    },
+    Anchor {
         id: "eu-west-1",
         host: "ec2.eu-west-1.amazonaws.com",
         metro: "Dublin",
         latitude: 53.3498,
         longitude: -6.2603,
+    },
+    Anchor {
+        id: "eu-west-3",
+        host: "ec2.eu-west-3.amazonaws.com",
+        metro: "Paris",
+        latitude: 48.8566,
+        longitude: 2.3522,
     },
     Anchor {
         id: "eu-north-1",
@@ -71,6 +92,13 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: 72.8777,
     },
     Anchor {
+        id: "ap-south-2",
+        host: "ec2.ap-south-2.amazonaws.com",
+        metro: "Hyderabad",
+        latitude: 17.3850,
+        longitude: 78.4867,
+    },
+    Anchor {
         id: "ap-southeast-1",
         host: "ec2.ap-southeast-1.amazonaws.com",
         metro: "Singapore",
@@ -99,11 +127,32 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: 139.6503,
     },
     Anchor {
+        id: "il-central-1",
+        host: "ec2.il-central-1.amazonaws.com",
+        metro: "Tel Aviv",
+        latitude: 32.0853,
+        longitude: 34.7818,
+    },
+    Anchor {
+        id: "me-central-1",
+        host: "ec2.me-central-1.amazonaws.com",
+        metro: "Abu Dhabi",
+        latitude: 24.4539,
+        longitude: 54.3773,
+    },
+    Anchor {
         id: "sa-east-1",
         host: "ec2.sa-east-1.amazonaws.com",
         metro: "Sao Paulo",
         latitude: -23.5505,
         longitude: -46.6333,
+    },
+    Anchor {
+        id: "mx-central-1",
+        host: "ec2.mx-central-1.amazonaws.com",
+        metro: "Queretaro",
+        latitude: 20.5888,
+        longitude: -100.3899,
     },
     Anchor {
         id: "af-south-1",
