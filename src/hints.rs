@@ -11,6 +11,41 @@ pub struct LocationHint {
     pub source: String,
 }
 
+pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
+    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)> = BTreeMap::new();
+
+    for measurement in measurements {
+        let Some(trace) = &measurement.trace else {
+            continue;
+        };
+
+        for hop in trace.hops.iter().take(6) {
+            let hop_weight = match hop.hop {
+                1 => 5.0,
+                2 => 4.0,
+                3 => 3.0,
+                4 => 2.0,
+                _ => 1.0,
+            };
+
+            if let Some(hostname) = &hop.hostname {
+                accumulate_matches(
+                    &mut weights,
+                    hostname,
+                    hop_weight,
+                    format!(
+                        "{} hop {} hostname={hostname}",
+                        measurement.anchor.label(),
+                        hop.hop
+                    ),
+                );
+            }
+        }
+    }
+
+    weights_to_hints(weights)
+}
+
 pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
     let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)> = BTreeMap::new();
 
@@ -50,6 +85,12 @@ pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> 
         }
     }
 
+    weights_to_hints(weights)
+}
+
+fn weights_to_hints(
+    weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)>,
+) -> Vec<LocationHint> {
     weights
         .into_values()
         .map(|(anchor, weight, sources)| LocationHint {
@@ -364,6 +405,7 @@ const ALIASES: &[Alias] = &[
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::probe::{Measurement, TraceHop, TraceSummary};
 
     #[test]
     fn extracts_frankfurt_hint_from_hostname() {
@@ -391,5 +433,28 @@ mod tests {
         );
 
         assert!(weights.is_empty());
+    }
+
+    #[test]
+    fn derives_trace_only_hints_from_trace_hostnames() {
+        let hints = derive_trace_location_hints(&[Measurement {
+            anchor: BUILTIN_ANCHORS[0],
+            resolved_ip: None,
+            ping: None,
+            trace: Some(TraceSummary {
+                hops: vec![TraceHop {
+                    hop: 2,
+                    address: Some("192.0.2.1".to_string()),
+                    hostname: Some("core1.de-cix-fra.digitalocean.net".to_string()),
+                    rtt_ms: Some(0.8),
+                    note: None,
+                }],
+            }),
+            notes: Vec::new(),
+        }]);
+
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].anchor.id, "eu-central-1");
+        assert!(hints[0].weight >= 4.0);
     }
 }

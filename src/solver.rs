@@ -349,8 +349,13 @@ fn dominant_local_anchor_score(
     let overflow_km = (distance_km - soft_radius_km).max(0.0);
     let strength = ((dominance_ratio - 3.0) / 3.0).clamp(0.0, 2.0)
         + if fastest.min_rtt_ms <= 2.0 { 1.0 } else { 0.0 };
+    let center_bias = if fastest.min_rtt_ms <= 2.0 && dominance_ratio >= 5.0 {
+        8.0 * strength * (distance_km / soft_radius_km.max(3.0)).powi(2)
+    } else {
+        0.0
+    };
 
-    60.0 * strength * (overflow_km / soft_radius_km.max(10.0)).powi(2)
+    60.0 * strength * (overflow_km / soft_radius_km.max(10.0)).powi(2) + center_bias
 }
 
 fn relative_spread_score(latitude: f64, longitude: f64, constraints: &[Constraint]) -> f64 {

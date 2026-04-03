@@ -6,6 +6,7 @@ use clap::Parser;
 
 use etherwhere::anchors::BUILTIN_ANCHORS;
 use etherwhere::cache::{ProbeCache, cached_ping_to_stats};
+use etherwhere::hints::derive_trace_location_hints;
 use etherwhere::probe::{
     LocalRttFloor, Measurement, ProbeConfig, ProbeMethod, measure_local_rtt_floor,
     measure_tcp_handshake, probe_anchor,
@@ -33,6 +34,8 @@ struct Cli {
     trace_fastest: usize,
     #[arg(long, default_value_t = false)]
     trace: bool,
+    #[arg(long, default_value_t = false)]
+    trace_hints: bool,
     #[arg(long, default_value_t = DEFAULT_KM_PER_MS)]
     km_per_ms: f64,
 }
@@ -58,7 +61,7 @@ fn main() -> Result<()> {
     apply_tcp_bias_correction(&mut measurements, tcp_bias_ms);
     apply_cached_anchor_floors(&mut measurements, &cache);
 
-    if cli.trace {
+    if cli.trace || cli.trace_hints {
         let mut ranked = measurements
             .iter()
             .enumerate()
@@ -77,7 +80,11 @@ fn main() -> Result<()> {
     let shared_rtt_floor_ms =
         calibrated_shared_rtt_floor_ms(&measurements, local_rtt_floor.as_ref());
     let constraints = constraints_from_measurements(&measurements, cli.km_per_ms);
-    let hints = Vec::new();
+    let hints = if cli.trace_hints {
+        derive_trace_location_hints(&measurements)
+    } else {
+        Vec::new()
+    };
     let estimate = solve(&constraints, &hints, shared_rtt_floor_ms);
 
     print_report(
@@ -88,6 +95,7 @@ fn main() -> Result<()> {
         shared_rtt_floor_ms,
         tcp_bias_ms,
         cache.anchor_floors.len(),
+        cli.trace_hints,
     );
 
     cache.update_from_measurements(&measurements);
@@ -283,6 +291,7 @@ fn print_report(
     shared_rtt_floor_ms: f64,
     tcp_bias_ms: f64,
     cached_anchor_count: usize,
+    trace_hints_enabled: bool,
 ) {
     println!("Model: RTT upper bound using {km_per_ms:.1} km/ms");
     println!(
@@ -361,10 +370,26 @@ fn print_report(
                 estimate.confidence_radius_km
             );
             println!("  max constraint overflow: {:.1} km", worst_overflow);
+            if trace_hints_enabled {
+                println!("  hop-derived hints used: {}", estimate.hints.len());
+            }
             if estimate.constraints.len() < 3 {
                 println!("  warning: geometry is underdetermined with fewer than 3 anchors");
             }
             println!();
+
+            if trace_hints_enabled && !estimate.hints.is_empty() {
+                println!("Hints:");
+                for hint in &estimate.hints {
+                    println!(
+                        "  {} weight={:.1} source={}",
+                        hint.anchor.label(),
+                        hint.weight,
+                        hint.source
+                    );
+                }
+                println!();
+            }
         }
         None => {
             println!("Estimate: unavailable");
