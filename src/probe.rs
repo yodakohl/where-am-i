@@ -54,6 +54,8 @@ pub struct Measurement {
     pub resolved_ip: Option<IpAddr>,
     pub ping: Option<PingStats>,
     pub trace: Option<TraceSummary>,
+    pub cache_age_days: Option<i64>,
+    pub cache_uncertainty_ms: f64,
     pub notes: Vec<String>,
 }
 
@@ -298,6 +300,8 @@ pub fn probe_anchor(anchor: Anchor, config: &ProbeConfig, include_trace: bool) -
         resolved_ip,
         ping,
         trace,
+        cache_age_days: None,
+        cache_uncertainty_ms: 0.0,
         notes,
     }
 }

@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::process::Command;
 
 use crate::anchors::{Anchor, BUILTIN_ANCHORS};
@@ -19,12 +19,14 @@ pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<Location
             continue;
         };
 
-        for hop in trace.hops.iter().take(6) {
+        for hop in trace.hops.iter().take(10) {
             let hop_weight = match hop.hop {
                 1 => 5.0,
                 2 => 4.0,
                 3 => 3.0,
                 4 => 2.0,
+                5 | 6 => 1.5,
+                7 | 8 => 2.0,
                 _ => 1.0,
             };
 
@@ -60,12 +62,14 @@ pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> 
 
     for measurement in measurements {
         if let Some(trace) = &measurement.trace {
-            for hop in trace.hops.iter().take(6) {
+            for hop in trace.hops.iter().take(10) {
                 let hop_weight = match hop.hop {
                     1 => 5.0,
                     2 => 4.0,
                     3 => 3.0,
                     4 => 2.0,
+                    5 | 6 => 1.5,
+                    7 | 8 => 2.0,
                     _ => 1.0,
                 };
 
@@ -138,10 +142,37 @@ fn accumulate_matches(
 }
 
 fn tokenize(text: &str) -> Vec<String> {
-    text.split(|ch: char| !ch.is_ascii_alphanumeric())
-        .filter(|token| !token.is_empty())
-        .map(str::to_string)
-        .collect()
+    let mut tokens = BTreeSet::new();
+
+    for raw_token in text.split(|ch: char| !ch.is_ascii_alphanumeric()) {
+        if raw_token.is_empty() {
+            continue;
+        }
+
+        tokens.insert(raw_token.to_string());
+
+        let alpha_prefix = raw_token
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect::<String>();
+        if alpha_prefix.len() >= 3 && alpha_prefix.len() < raw_token.len() {
+            tokens.insert(alpha_prefix);
+        }
+
+        let alpha_suffix = raw_token
+            .chars()
+            .rev()
+            .take_while(|ch| ch.is_ascii_alphabetic())
+            .collect::<String>()
+            .chars()
+            .rev()
+            .collect::<String>();
+        if alpha_suffix.len() >= 3 && alpha_suffix.len() < raw_token.len() {
+            tokens.insert(alpha_suffix);
+        }
+    }
+
+    tokens.into_iter().collect()
 }
 
 fn local_hostname() -> Option<String> {
@@ -179,6 +210,16 @@ const ALIASES: &[Alias] = &[
         token: "ffm",
         id: "eu-central-1",
         partial: false,
+    },
+    Alias {
+        token: "muc",
+        id: "munich-de-cix",
+        partial: false,
+    },
+    Alias {
+        token: "munich",
+        id: "munich-de-cix",
+        partial: true,
     },
     Alias {
         token: "zrh",
@@ -228,6 +269,71 @@ const ALIASES: &[Alias] = &[
     Alias {
         token: "paris",
         id: "eu-west-3",
+        partial: true,
+    },
+    Alias {
+        token: "prg",
+        id: "cz-prague-1",
+        partial: false,
+    },
+    Alias {
+        token: "prague",
+        id: "cz-prague-1",
+        partial: true,
+    },
+    Alias {
+        token: "vie",
+        id: "at-vienna-1",
+        partial: false,
+    },
+    Alias {
+        token: "vix",
+        id: "at-vienna-1",
+        partial: true,
+    },
+    Alias {
+        token: "vienna",
+        id: "at-vienna-1",
+        partial: true,
+    },
+    Alias {
+        token: "grz",
+        id: "at-graz-1",
+        partial: false,
+    },
+    Alias {
+        token: "graz",
+        id: "at-graz-1",
+        partial: true,
+    },
+    Alias {
+        token: "bud",
+        id: "hu-budapest-1",
+        partial: false,
+    },
+    Alias {
+        token: "budapest",
+        id: "hu-budapest-1",
+        partial: true,
+    },
+    Alias {
+        token: "lju",
+        id: "si-ljubljana-1",
+        partial: false,
+    },
+    Alias {
+        token: "ljubljana",
+        id: "si-ljubljana-1",
+        partial: true,
+    },
+    Alias {
+        token: "zag",
+        id: "hr-zagreb-1",
+        partial: false,
+    },
+    Alias {
+        token: "zagreb",
+        id: "hr-zagreb-1",
         partial: true,
     },
     Alias {
@@ -450,11 +556,62 @@ mod tests {
                     note: None,
                 }],
             }),
+            cache_age_days: None,
+            cache_uncertainty_ms: 0.0,
             notes: Vec::new(),
         }]);
 
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].anchor.id, "eu-central-1");
         assert!(hints[0].weight >= 4.0);
+    }
+
+    #[test]
+    fn derives_vienna_hint_from_later_trace_hops() {
+        let hints = derive_trace_location_hints(&[Measurement {
+            anchor: BUILTIN_ANCHORS[0],
+            resolved_ip: None,
+            ping: None,
+            trace: Some(TraceSummary {
+                hops: vec![TraceHop {
+                    hop: 8,
+                    address: Some("77.244.255.130".to_string()),
+                    hostname: Some("ae10.edge01.ndc2.vie.nessus.at".to_string()),
+                    rtt_ms: Some(23.6),
+                    note: None,
+                }],
+            }),
+            cache_age_days: None,
+            cache_uncertainty_ms: 0.0,
+            notes: Vec::new(),
+        }]);
+
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].anchor.id, "at-vienna-1");
+    }
+
+    #[test]
+    fn derives_vienna_hint_from_embedded_code_token() {
+        let hints = derive_trace_location_hints(&[Measurement {
+            anchor: BUILTIN_ANCHORS[0],
+            resolved_ip: None,
+            ping: None,
+            trace: Some(TraceSummary {
+                hops: vec![TraceHop {
+                    hop: 7,
+                    address: Some("193.203.0.85".to_string()),
+                    hostname: Some("at-vie09c-ri01.as8412.net".to_string()),
+                    rtt_ms: Some(23.5),
+                    note: None,
+                }],
+            }),
+            cache_age_days: None,
+            cache_uncertainty_ms: 0.0,
+            notes: Vec::new(),
+        }]);
+
+        assert_eq!(hints.len(), 1);
+        assert_eq!(hints[0].anchor.id, "at-vienna-1");
+        assert!(hints[0].weight >= 2.0);
     }
 }
