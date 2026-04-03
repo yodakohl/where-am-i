@@ -50,6 +50,13 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: -6.2603,
     },
     Anchor {
+        id: "eu-west-2",
+        host: "ec2.eu-west-2.amazonaws.com",
+        metro: "London",
+        latitude: 51.5072,
+        longitude: -0.1276,
+    },
+    Anchor {
         id: "eu-west-3",
         host: "ec2.eu-west-3.amazonaws.com",
         metro: "Paris",
@@ -127,11 +134,25 @@ pub const BUILTIN_ANCHORS: &[Anchor] = &[
         longitude: 139.6503,
     },
     Anchor {
+        id: "ap-northeast-2",
+        host: "ec2.ap-northeast-2.amazonaws.com",
+        metro: "Seoul",
+        latitude: 37.5665,
+        longitude: 126.9780,
+    },
+    Anchor {
         id: "il-central-1",
         host: "ec2.il-central-1.amazonaws.com",
         metro: "Tel Aviv",
         latitude: 32.0853,
         longitude: 34.7818,
+    },
+    Anchor {
+        id: "me-south-1",
+        host: "ec2.me-south-1.amazonaws.com",
+        metro: "Bahrain",
+        latitude: 26.0667,
+        longitude: 50.5577,
     },
     Anchor {
         id: "me-central-1",
