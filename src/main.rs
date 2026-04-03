@@ -59,13 +59,30 @@ fn main() -> Result<()> {
         .cloned()
         .unwrap_or_default();
 
-    let mut measurements = BUILTIN_ANCHORS
+    let coarse_anchors = BUILTIN_ANCHORS
         .iter()
         .copied()
+        .filter(|anchor| !is_regional_refinement_anchor(anchor.id))
+        .collect::<Vec<_>>();
+    let coarse_anchor_count = coarse_anchors.len();
+
+    let mut measurements = coarse_anchors
+        .into_iter()
         .map(|anchor| probe_anchor(anchor, &coarse_config, false))
         .collect::<Vec<_>>();
-    let refinement_indices =
-        select_refinement_indices(&measurements, active_cache.tcp_bias_ms, cli.km_per_ms);
+    let regional_anchors =
+        select_regional_refinement_anchors(&measurements, active_cache.tcp_bias_ms, cli.km_per_ms);
+    measurements.extend(
+        regional_anchors
+            .into_iter()
+            .map(|anchor| probe_anchor(anchor, &config, false)),
+    );
+
+    let refinement_indices = select_refinement_indices(
+        &measurements[..coarse_anchor_count],
+        active_cache.tcp_bias_ms,
+        cli.km_per_ms,
+    );
     refine_selected_measurements(&mut measurements, &config, &refinement_indices, false);
 
     if cli.trace || cli.trace_hints {
@@ -123,6 +140,47 @@ fn coarse_probe_config(config: &ProbeConfig) -> ProbeConfig {
         max_resolved_ips: 1,
         ..*config
     }
+}
+
+fn is_regional_refinement_anchor(anchor_id: &str) -> bool {
+    matches!(
+        anchor_id,
+        "munich-de-cix"
+            | "at-vienna-1"
+            | "at-vienna-interxion-1"
+            | "at-graz-1"
+            | "cz-prague-1"
+            | "hu-budapest-1"
+            | "si-ljubljana-1"
+            | "hr-zagreb-1"
+    )
+}
+
+fn select_regional_refinement_anchors(
+    measurements: &[Measurement],
+    cached_tcp_bias_ms: Option<f64>,
+    km_per_ms: f64,
+) -> Vec<etherwhere::anchors::Anchor> {
+    let Some((coarse_lat, coarse_lon)) =
+        coarse_estimate(measurements, cached_tcp_bias_ms, km_per_ms)
+    else {
+        return Vec::new();
+    };
+
+    let mut anchors = BUILTIN_ANCHORS
+        .iter()
+        .copied()
+        .filter(|anchor| is_regional_refinement_anchor(anchor.id))
+        .filter_map(|anchor| {
+            let distance_km =
+                haversine_km(coarse_lat, coarse_lon, anchor.latitude, anchor.longitude);
+            (distance_km <= 1400.0).then_some((anchor, distance_km))
+        })
+        .collect::<Vec<_>>();
+    anchors.sort_by(|left, right| left.1.total_cmp(&right.1));
+    anchors.truncate(8);
+
+    anchors.into_iter().map(|(anchor, _)| anchor).collect()
 }
 
 fn refine_selected_measurements(
