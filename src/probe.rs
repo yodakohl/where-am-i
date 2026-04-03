@@ -63,6 +63,12 @@ pub struct LocalRttFloor {
     pub min_ms: f64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkFingerprint {
+    pub id: String,
+    pub source: String,
+}
+
 impl PingStats {
     pub fn upper_bound_km(&self, km_per_ms: f64) -> f64 {
         self.min_ms * km_per_ms
@@ -139,6 +145,37 @@ pub fn measure_local_rtt_floor(config: &ProbeConfig) -> Option<LocalRttFloor> {
     }
 
     best
+}
+
+pub fn current_network_fingerprint(config: &ProbeConfig) -> Option<NetworkFingerprint> {
+    let mut parts = Vec::new();
+    let mut sources = Vec::new();
+
+    if let Some(route) = default_route_signature() {
+        parts.extend(route.parts);
+        sources.push(route.source);
+    }
+
+    let trace_hops = tracepath_local_candidates(config)
+        .into_iter()
+        .take(2)
+        .map(|(address, source)| {
+            sources.push(source);
+            address
+        })
+        .collect::<Vec<_>>();
+    if !trace_hops.is_empty() {
+        parts.push(format!("trace={}", trace_hops.join(",")));
+    }
+
+    if parts.is_empty() {
+        return None;
+    }
+
+    Some(NetworkFingerprint {
+        id: parts.join(";"),
+        source: sources.join(" | "),
+    })
 }
 
 pub fn measure_tcp_handshake(target: &str, timeout_ms: u64) -> Option<PingStats> {
@@ -291,6 +328,16 @@ fn resolve_anchor_ips(anchor: &Anchor) -> Result<Vec<IpAddr>> {
 }
 
 fn default_gateway_ip() -> Option<String> {
+    default_route_signature().and_then(|route| route.gateway_ip)
+}
+
+struct DefaultRouteSignature {
+    gateway_ip: Option<String>,
+    parts: Vec<String>,
+    source: String,
+}
+
+fn default_route_signature() -> Option<DefaultRouteSignature> {
     let output = Command::new("ip")
         .args(["route", "show", "default"])
         .output()
@@ -304,8 +351,45 @@ fn default_gateway_ip() -> Option<String> {
         .lines()
         .find_map(|line| {
             let tokens = line.split_whitespace().collect::<Vec<_>>();
-            let via_index = tokens.iter().position(|token| *token == "via")?;
-            tokens.get(via_index + 1).map(|ip| (*ip).to_string())
+            if tokens.first().copied() != Some("default") {
+                return None;
+            }
+
+            let gateway_ip = tokens
+                .iter()
+                .position(|token| *token == "via")
+                .and_then(|index| tokens.get(index + 1))
+                .map(|value| (*value).to_string());
+            let device = tokens
+                .iter()
+                .position(|token| *token == "dev")
+                .and_then(|index| tokens.get(index + 1))
+                .map(|value| (*value).to_string());
+            let source_ip = tokens
+                .iter()
+                .position(|token| *token == "src")
+                .and_then(|index| tokens.get(index + 1))
+                .map(|value| (*value).to_string());
+
+            let mut parts = Vec::new();
+            if let Some(device) = &device {
+                parts.push(format!("dev={device}"));
+            }
+            if let Some(gateway_ip) = &gateway_ip {
+                parts.push(format!("via={gateway_ip}"));
+            }
+            if let Some(source_ip) = &source_ip {
+                parts.push(format!("src={source_ip}"));
+            }
+            if parts.is_empty() {
+                return None;
+            }
+
+            Some(DefaultRouteSignature {
+                gateway_ip,
+                source: format!("default route: {}", line.trim()),
+                parts,
+            })
         })
 }
 

@@ -5,11 +5,11 @@ use anyhow::Result;
 use clap::Parser;
 
 use etherwhere::anchors::BUILTIN_ANCHORS;
-use etherwhere::cache::{ProbeCache, cached_ping_to_stats};
+use etherwhere::cache::{CacheProfile, ProbeCache, cached_ping_to_stats};
 use etherwhere::hints::derive_trace_location_hints;
 use etherwhere::probe::{
-    LocalRttFloor, Measurement, ProbeConfig, ProbeMethod, measure_local_rtt_floor,
-    measure_tcp_handshake, probe_anchor,
+    LocalRttFloor, Measurement, ProbeConfig, ProbeMethod, current_network_fingerprint,
+    measure_local_rtt_floor, measure_tcp_handshake, probe_anchor,
 };
 use etherwhere::solver::{constraints_from_measurements, haversine_km, solve};
 
@@ -50,6 +50,12 @@ fn main() -> Result<()> {
         timeout_ms: cli.timeout_ms,
         trace_hops: cli.trace_hops,
     };
+    let network_fingerprint = current_network_fingerprint(&config);
+    let active_cache = network_fingerprint
+        .as_ref()
+        .and_then(|fingerprint| cache.profile(&fingerprint.id))
+        .cloned()
+        .unwrap_or_default();
 
     let mut measurements = BUILTIN_ANCHORS
         .iter()
@@ -57,9 +63,12 @@ fn main() -> Result<()> {
         .map(|anchor| probe_anchor(anchor, &config, false))
         .collect::<Vec<_>>();
     refine_fastest_measurements(&mut measurements, &config);
-    let tcp_bias_ms = merge_tcp_bias_ms(calibrate_tcp_bias_ms(&measurements, &config), &cache);
+    let tcp_bias_ms = merge_tcp_bias_ms(
+        calibrate_tcp_bias_ms(&measurements, &config),
+        active_cache.tcp_bias_ms,
+    );
     apply_tcp_bias_correction(&mut measurements, tcp_bias_ms);
-    apply_cached_anchor_floors(&mut measurements, &cache);
+    apply_cached_anchor_floors(&mut measurements, &active_cache);
 
     if cli.trace || cli.trace_hints {
         let mut ranked = measurements
@@ -76,7 +85,10 @@ fn main() -> Result<()> {
         }
     }
 
-    let local_rtt_floor = merge_local_rtt_floor(measure_local_rtt_floor(&config), &cache);
+    let local_rtt_floor = merge_local_rtt_floor(
+        measure_local_rtt_floor(&config),
+        active_cache.local_rtt_floor_ms,
+    );
     let shared_rtt_floor_ms =
         calibrated_shared_rtt_floor_ms(&measurements, local_rtt_floor.as_ref());
     let constraints = constraints_from_measurements(&measurements, cli.km_per_ms);
@@ -94,14 +106,16 @@ fn main() -> Result<()> {
         &local_rtt_floor,
         shared_rtt_floor_ms,
         tcp_bias_ms,
-        cache.anchor_floors.len(),
+        active_cache.anchor_floors.len(),
         cli.trace_hints,
     );
 
-    cache.update_from_measurements(&measurements);
-    cache.update_local_rtt_floor(local_rtt_floor.as_ref());
-    cache.update_tcp_bias(tcp_bias_ms);
-    let _ = cache.save(cache_path);
+    if let Some(network_fingerprint) = &network_fingerprint {
+        cache.update_from_measurements(&network_fingerprint.id, &measurements);
+        cache.update_local_rtt_floor(&network_fingerprint.id, local_rtt_floor.as_ref());
+        cache.update_tcp_bias(&network_fingerprint.id, tcp_bias_ms);
+        let _ = cache.save(cache_path);
+    }
 
     Ok(())
 }
@@ -174,8 +188,8 @@ fn calibrated_shared_rtt_floor_ms(
     local_rtt_floor.min_ms.min(fastest_anchor_rtt_ms * 0.75)
 }
 
-fn merge_tcp_bias_ms(current_tcp_bias_ms: f64, cache: &ProbeCache) -> f64 {
-    match cache.tcp_bias_ms {
+fn merge_tcp_bias_ms(current_tcp_bias_ms: f64, cached_tcp_bias_ms: Option<f64>) -> f64 {
+    match cached_tcp_bias_ms {
         Some(cached_tcp_bias_ms) if current_tcp_bias_ms > 0.0 => {
             current_tcp_bias_ms.min(cached_tcp_bias_ms)
         }
@@ -186,9 +200,9 @@ fn merge_tcp_bias_ms(current_tcp_bias_ms: f64, cache: &ProbeCache) -> f64 {
 
 fn merge_local_rtt_floor(
     current_local_rtt_floor: Option<LocalRttFloor>,
-    cache: &ProbeCache,
+    cached_min_ms: Option<f64>,
 ) -> Option<LocalRttFloor> {
-    match (current_local_rtt_floor, cache.local_rtt_floor_ms) {
+    match (current_local_rtt_floor, cached_min_ms) {
         (Some(current), Some(cached_min_ms)) if cached_min_ms < current.min_ms => {
             Some(LocalRttFloor {
                 target: CACHE_PATH.to_string(),
@@ -206,7 +220,7 @@ fn merge_local_rtt_floor(
     }
 }
 
-fn apply_cached_anchor_floors(measurements: &mut [Measurement], cache: &ProbeCache) {
+fn apply_cached_anchor_floors(measurements: &mut [Measurement], cache: &CacheProfile) {
     for measurement in measurements {
         let Some(cached_ping) = cache.anchor_floors.get(measurement.anchor.id) else {
             continue;
