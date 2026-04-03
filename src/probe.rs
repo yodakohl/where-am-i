@@ -14,6 +14,7 @@ pub struct ProbeConfig {
     pub timeout_ms: u64,
     pub trace_hops: u8,
     pub rounds: u8,
+    pub max_resolved_ips: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -184,6 +185,7 @@ pub fn measure_tcp_handshake(target: &str, timeout_ms: u64) -> Option<PingStats>
         timeout_ms,
         trace_hops: 1,
         rounds: 1,
+        max_resolved_ips: 1,
     };
 
     run_tcp_probe(target, &config).ok().flatten()
@@ -195,10 +197,11 @@ pub fn probe_anchor(anchor: Anchor, config: &ProbeConfig, include_trace: bool) -
     let mut ping = None;
     let mut successful_rounds = 0u8;
     let rounds = config.rounds.max(1);
+    let resolved_ip_limit = config.max_resolved_ips.clamp(1, MAX_RESOLVED_IPS_PER_ROUND);
 
     for round in 1..=rounds {
         let round_ips = resolve_anchor_ips(&anchor).ok().unwrap_or_default();
-        let address_count = round_ips.len().min(MAX_RESOLVED_IPS_PER_ROUND);
+        let address_count = round_ips.len().min(resolved_ip_limit);
         if round_ips.is_empty() {
             notes.push(format!("round {round}: DNS resolution failed"));
         }
@@ -208,7 +211,7 @@ pub fn probe_anchor(anchor: Anchor, config: &ProbeConfig, include_trace: bool) -
         } else {
             round_ips
                 .into_iter()
-                .take(MAX_RESOLVED_IPS_PER_ROUND)
+                .take(resolved_ip_limit)
                 .map(|ip| (Some(ip), ip.to_string()))
                 .collect::<Vec<_>>()
         };

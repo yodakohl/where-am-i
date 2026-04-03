@@ -308,12 +308,18 @@ fn objective(
     let dominant_anchor_score =
         dominant_local_anchor_score(latitude, longitude, constraints, shared_rtt_floor_ms);
     let relative_spread_score = relative_spread_score(latitude, longitude, constraints);
+    let regional_cluster_score = regional_cluster_score(latitude, longitude, constraints);
 
     let fit_penalty = 80.0 * fit.weighted_rmse_ms
         + 0.5 * fit.overhead_ms
         + 2000.0 * (fit.ms_per_km - MIN_MS_PER_KM).max(0.0);
 
-    upper_bound_score + fit_penalty + hint_score + dominant_anchor_score + relative_spread_score
+    upper_bound_score
+        + fit_penalty
+        + hint_score
+        + dominant_anchor_score
+        + relative_spread_score
+        + regional_cluster_score
 }
 
 fn dominant_local_anchor_score(
@@ -408,6 +414,158 @@ fn relative_spread_score(latitude: f64, longitude: f64, constraints: &[Constrain
             45.0 * weight * (deficit_km / minimum_spread_km.max(100.0)).powi(2)
         })
         .sum()
+}
+
+fn regional_cluster_score(latitude: f64, longitude: f64, constraints: &[Constraint]) -> f64 {
+    let Some(cluster) = regional_cluster(constraints) else {
+        return 0.0;
+    };
+
+    let distance_to_center_km = haversine_km(
+        latitude,
+        longitude,
+        cluster.center_latitude,
+        cluster.center_longitude,
+    );
+    let soft_radius_km = (cluster.span_km * 0.40).clamp(140.0, 650.0);
+    let center_penalty =
+        18.0 * cluster.strength * (distance_to_center_km / soft_radius_km.max(120.0)).powi(2);
+
+    let fastest_distance_km = haversine_km(
+        latitude,
+        longitude,
+        cluster.fastest.anchor.latitude,
+        cluster.fastest.anchor.longitude,
+    );
+    let ordering_penalty = cluster
+        .members
+        .iter()
+        .skip(1)
+        .map(|constraint| {
+            let observed_delta_ms = constraint.min_rtt_ms - cluster.fastest.min_rtt_ms;
+            if observed_delta_ms <= 0.5 {
+                return 0.0;
+            }
+
+            let distance_km = haversine_km(
+                latitude,
+                longitude,
+                constraint.anchor.latitude,
+                constraint.anchor.longitude,
+            );
+            let predicted_delta_km = (distance_km - fastest_distance_km).max(0.0);
+            let allowed_delta_km = observed_delta_ms * 85.0 + 140.0;
+            let overflow_km = (predicted_delta_km - allowed_delta_km).max(0.0);
+            let weight = (observed_delta_ms / 6.0).clamp(0.5, 1.5);
+
+            14.0 * cluster.strength * weight * (overflow_km / allowed_delta_km.max(150.0)).powi(2)
+        })
+        .sum::<f64>();
+
+    center_penalty + ordering_penalty
+}
+
+#[derive(Debug, Clone)]
+struct RegionalCluster<'a> {
+    fastest: &'a Constraint,
+    members: Vec<&'a Constraint>,
+    center_latitude: f64,
+    center_longitude: f64,
+    span_km: f64,
+    strength: f64,
+}
+
+fn regional_cluster<'a>(constraints: &'a [Constraint]) -> Option<RegionalCluster<'a>> {
+    if constraints.len() < 3 {
+        return None;
+    }
+
+    let mut ranked = constraints.iter().collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.min_rtt_ms.total_cmp(&right.min_rtt_ms));
+
+    let fastest = ranked[0];
+    let second_fastest = ranked[1];
+    let dominance_ratio = second_fastest.min_rtt_ms / fastest.min_rtt_ms.max(0.1);
+    if fastest.min_rtt_ms <= 12.0 && dominance_ratio >= 1.6 {
+        return None;
+    }
+
+    let cutoff_ms = fastest.min_rtt_ms + 25.0;
+    let members = ranked
+        .into_iter()
+        .take(5)
+        .filter(|constraint| constraint.min_rtt_ms <= cutoff_ms)
+        .collect::<Vec<_>>();
+    if members.len() < 3 {
+        return None;
+    }
+
+    let span_km = cluster_span_km(&members);
+    if span_km > 2200.0 {
+        return None;
+    }
+
+    let strength = ((members.len() as f64 - 2.0) * (1.45 - dominance_ratio).max(0.2)).min(2.5);
+    if strength <= 0.0 {
+        return None;
+    }
+
+    let (center_latitude, center_longitude) = weighted_anchor_centroid(&members);
+    Some(RegionalCluster {
+        fastest,
+        members,
+        center_latitude,
+        center_longitude,
+        span_km,
+        strength,
+    })
+}
+
+fn weighted_anchor_centroid(constraints: &[&Constraint]) -> (f64, f64) {
+    let mut x = 0.0;
+    let mut y = 0.0;
+    let mut z = 0.0;
+    let mut total = 0.0;
+
+    for constraint in constraints {
+        let weight = 1.0 / constraint.min_rtt_ms.max(5.0).powi(2);
+        let lat = constraint.anchor.latitude.to_radians();
+        let lon = constraint.anchor.longitude.to_radians();
+        x += weight * lat.cos() * lon.cos();
+        y += weight * lat.cos() * lon.sin();
+        z += weight * lat.sin();
+        total += weight;
+    }
+
+    if total == 0.0 {
+        return (0.0, 0.0);
+    }
+
+    x /= total;
+    y /= total;
+    z /= total;
+
+    let lon = y.atan2(x);
+    let hyp = (x.powi(2) + y.powi(2)).sqrt();
+    let lat = z.atan2(hyp);
+    (lat.to_degrees(), lon.to_degrees())
+}
+
+fn cluster_span_km(constraints: &[&Constraint]) -> f64 {
+    let mut span_km: f64 = 0.0;
+
+    for (index, left) in constraints.iter().enumerate() {
+        for right in constraints.iter().skip(index + 1) {
+            span_km = span_km.max(haversine_km(
+                left.anchor.latitude,
+                left.anchor.longitude,
+                right.anchor.latitude,
+                right.anchor.longitude,
+            ));
+        }
+    }
+
+    span_km
 }
 
 fn stability_radius_km(
@@ -571,6 +729,14 @@ mod tests {
     use super::*;
     use crate::anchors::BUILTIN_ANCHORS;
 
+    fn anchor(id: &str) -> Anchor {
+        BUILTIN_ANCHORS
+            .iter()
+            .copied()
+            .find(|anchor| anchor.id == id)
+            .expect("anchor should exist")
+    }
+
     #[test]
     fn haversine_matches_expected_scale() {
         let paris_to_london = haversine_km(48.8566, 2.3522, 51.5072, -0.1276);
@@ -693,5 +859,87 @@ mod tests {
         );
 
         assert!(guided_distance < raw_distance);
+    }
+
+    #[test]
+    fn regional_cluster_prior_improves_alpine_geometry() {
+        let salzburg = (47.8095, 13.0550);
+        let constraints = vec![
+            Constraint {
+                anchor: anchor("eu-central-1"),
+                upper_bound_km: 3372.0,
+                min_rtt_ms: 33.06,
+            },
+            Constraint {
+                anchor: anchor("eu-central-2"),
+                upper_bound_km: 3178.0,
+                min_rtt_ms: 31.15,
+            },
+            Constraint {
+                anchor: anchor("eu-south-1"),
+                upper_bound_km: 2920.0,
+                min_rtt_ms: 28.63,
+            },
+            Constraint {
+                anchor: anchor("eu-south-2"),
+                upper_bound_km: 5620.0,
+                min_rtt_ms: 55.10,
+            },
+            Constraint {
+                anchor: anchor("eu-west-1"),
+                upper_bound_km: 5681.0,
+                min_rtt_ms: 55.70,
+            },
+            Constraint {
+                anchor: anchor("eu-west-2"),
+                upper_bound_km: 4782.0,
+                min_rtt_ms: 46.88,
+            },
+            Constraint {
+                anchor: anchor("eu-west-3"),
+                upper_bound_km: 3693.0,
+                min_rtt_ms: 36.21,
+            },
+            Constraint {
+                anchor: anchor("eu-north-1"),
+                upper_bound_km: 5069.0,
+                min_rtt_ms: 49.70,
+            },
+            Constraint {
+                anchor: anchor("il-central-1"),
+                upper_bound_km: 8501.0,
+                min_rtt_ms: 83.35,
+            },
+            Constraint {
+                anchor: anchor("us-east-1"),
+                upper_bound_km: 11878.0,
+                min_rtt_ms: 116.45,
+            },
+            Constraint {
+                anchor: anchor("ca-central-1"),
+                upper_bound_km: 12150.0,
+                min_rtt_ms: 119.12,
+            },
+            Constraint {
+                anchor: anchor("me-central-1"),
+                upper_bound_km: 14203.0,
+                min_rtt_ms: 139.25,
+            },
+            Constraint {
+                anchor: anchor("ap-south-1"),
+                upper_bound_km: 15288.0,
+                min_rtt_ms: 149.88,
+            },
+        ];
+
+        let estimate = solve(&constraints, &[], 2.81).expect("estimate should exist");
+        let error_km = haversine_km(
+            estimate.latitude,
+            estimate.longitude,
+            salzburg.0,
+            salzburg.1,
+        );
+
+        assert!(error_km < 250.0, "error_km={error_km}");
     }
 }

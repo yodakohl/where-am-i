@@ -11,7 +11,7 @@ use etherwhere::probe::{
     LocalRttFloor, Measurement, ProbeConfig, ProbeMethod, current_network_fingerprint,
     measure_local_rtt_floor, measure_tcp_handshake, probe_anchor,
 };
-use etherwhere::solver::{constraints_from_measurements, haversine_km, solve};
+use etherwhere::solver::{Constraint, constraints_from_measurements, haversine_km, solve};
 
 const CACHE_PATH: &str = ".etherwhere-cache";
 const DEFAULT_KM_PER_MS: f64 = 102.0;
@@ -49,7 +49,9 @@ fn main() -> Result<()> {
         rounds: cli.rounds,
         timeout_ms: cli.timeout_ms,
         trace_hops: cli.trace_hops,
+        max_resolved_ips: 3,
     };
+    let coarse_config = coarse_probe_config(&config);
     let network_fingerprint = current_network_fingerprint(&config);
     let active_cache = network_fingerprint
         .as_ref()
@@ -60,30 +62,24 @@ fn main() -> Result<()> {
     let mut measurements = BUILTIN_ANCHORS
         .iter()
         .copied()
-        .map(|anchor| probe_anchor(anchor, &config, false))
+        .map(|anchor| probe_anchor(anchor, &coarse_config, false))
         .collect::<Vec<_>>();
-    refine_fastest_measurements(&mut measurements, &config);
+    let refinement_indices =
+        select_refinement_indices(&measurements, active_cache.tcp_bias_ms, cli.km_per_ms);
+    refine_selected_measurements(&mut measurements, &config, &refinement_indices, false);
+
+    if cli.trace || cli.trace_hints {
+        let trace_indices =
+            select_trace_indices(&measurements, active_cache.tcp_bias_ms, cli.trace_fastest);
+        refine_selected_measurements(&mut measurements, &config, &trace_indices, true);
+    }
+
     let tcp_bias_ms = merge_tcp_bias_ms(
         calibrate_tcp_bias_ms(&measurements, &config),
         active_cache.tcp_bias_ms,
     );
     apply_tcp_bias_correction(&mut measurements, tcp_bias_ms);
     apply_cached_anchor_floors(&mut measurements, &active_cache);
-
-    if cli.trace || cli.trace_hints {
-        let mut ranked = measurements
-            .iter()
-            .enumerate()
-            .filter_map(|(index, measurement)| {
-                measurement.ping.as_ref().map(|ping| (index, ping.min_ms))
-            })
-            .collect::<Vec<_>>();
-        ranked.sort_by(|left, right| left.1.total_cmp(&right.1));
-
-        for (index, _) in ranked.into_iter().take(cli.trace_fastest) {
-            measurements[index] = probe_anchor(measurements[index].anchor, &config, true);
-        }
-    }
 
     let local_rtt_floor = merge_local_rtt_floor(
         measure_local_rtt_floor(&config),
@@ -120,45 +116,163 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-fn refine_fastest_measurements(measurements: &mut [Measurement], config: &ProbeConfig) {
+fn coarse_probe_config(config: &ProbeConfig) -> ProbeConfig {
+    ProbeConfig {
+        ping_count: 1,
+        rounds: 1,
+        max_resolved_ips: 1,
+        ..*config
+    }
+}
+
+fn refine_selected_measurements(
+    measurements: &mut [Measurement],
+    config: &ProbeConfig,
+    refine_indices: &BTreeSet<usize>,
+    include_trace: bool,
+) {
+    for index in refine_indices {
+        let refined = probe_anchor(measurements[*index].anchor, config, include_trace);
+        merge_measurement(&mut measurements[*index], refined);
+    }
+}
+
+fn select_trace_indices(
+    measurements: &[Measurement],
+    cached_tcp_bias_ms: Option<f64>,
+    trace_fastest: usize,
+) -> BTreeSet<usize> {
     let mut ranked = measurements
         .iter()
         .enumerate()
         .filter_map(|(index, measurement)| {
-            measurement.ping.as_ref().map(|ping| (index, ping.min_ms))
+            effective_min_rtt_ms(measurement, cached_tcp_bias_ms).map(|rtt_ms| (index, rtt_ms))
+        })
+        .collect::<Vec<_>>();
+    ranked.sort_by(|left, right| left.1.total_cmp(&right.1));
+
+    ranked
+        .into_iter()
+        .take(trace_fastest)
+        .map(|(index, _)| index)
+        .collect()
+}
+
+fn select_refinement_indices(
+    measurements: &[Measurement],
+    cached_tcp_bias_ms: Option<f64>,
+    km_per_ms: f64,
+) -> BTreeSet<usize> {
+    let mut ranked = measurements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, measurement)| {
+            effective_min_rtt_ms(measurement, cached_tcp_bias_ms).map(|rtt_ms| (index, rtt_ms))
         })
         .collect::<Vec<_>>();
     ranked.sort_by(|left, right| left.1.total_cmp(&right.1));
 
     let Some((_, fastest_rtt_ms)) = ranked.first().copied() else {
-        return;
+        return BTreeSet::new();
     };
 
-    let threshold_ms = fastest_rtt_ms.mul_add(4.0, 0.0).max(25.0);
     let mut refine_indices = ranked
         .into_iter()
-        .filter_map(|(index, rtt_ms)| (rtt_ms <= threshold_ms).then_some(index))
-        .take(6)
+        .take(4)
+        .map(|(index, _)| index)
         .collect::<BTreeSet<_>>();
 
-    for (index, measurement) in measurements.iter().enumerate() {
-        if measurement.ping.is_none() {
+    let threshold_ms = fastest_rtt_ms + 30.0;
+    if let Some((coarse_lat, coarse_lon)) =
+        coarse_estimate(measurements, cached_tcp_bias_ms, km_per_ms)
+    {
+        let mut nearby = measurements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measurement)| {
+                let rtt_ms = effective_min_rtt_ms(measurement, cached_tcp_bias_ms)?;
+                if rtt_ms > threshold_ms {
+                    return None;
+                }
+
+                let distance_km = haversine_km(
+                    coarse_lat,
+                    coarse_lon,
+                    measurement.anchor.latitude,
+                    measurement.anchor.longitude,
+                );
+                (distance_km <= 2200.0).then_some((index, rtt_ms, distance_km))
+            })
+            .collect::<Vec<_>>();
+        nearby.sort_by(|left, right| {
+            (left.1 + left.2 / 200.0).total_cmp(&(right.1 + right.2 / 200.0))
+        });
+
+        for (index, _, _) in nearby.into_iter().take(8) {
             refine_indices.insert(index);
         }
     }
 
-    let refine_config = ProbeConfig {
-        rounds: config.rounds.max(3) + 2,
-        ping_count: config.ping_count.max(1),
-        ..*config
-    };
-
-    for index in refine_indices {
-        let refined = probe_anchor(measurements[index].anchor, &refine_config, false);
-        if should_replace_measurement(&measurements[index], &refined) {
-            measurements[index] = refined;
-        }
+    let mut missing = measurements
+        .iter()
+        .enumerate()
+        .filter_map(|(index, measurement)| measurement.ping.is_none().then_some(index))
+        .collect::<Vec<_>>();
+    missing.truncate(2);
+    for index in missing {
+        refine_indices.insert(index);
     }
+
+    while refine_indices.len() < 6 {
+        let next = measurements
+            .iter()
+            .enumerate()
+            .filter_map(|(index, measurement)| {
+                (!refine_indices.contains(&index))
+                    .then(|| effective_min_rtt_ms(measurement, cached_tcp_bias_ms))
+                    .flatten()
+                    .map(|rtt_ms| (index, rtt_ms))
+            })
+            .min_by(|left, right| left.1.total_cmp(&right.1));
+        let Some((index, _)) = next else {
+            break;
+        };
+        refine_indices.insert(index);
+    }
+
+    refine_indices
+}
+
+fn coarse_estimate(
+    measurements: &[Measurement],
+    cached_tcp_bias_ms: Option<f64>,
+    km_per_ms: f64,
+) -> Option<(f64, f64)> {
+    let constraints = measurements
+        .iter()
+        .filter_map(|measurement| {
+            let min_rtt_ms = effective_min_rtt_ms(measurement, cached_tcp_bias_ms)?;
+            Some(Constraint {
+                anchor: measurement.anchor,
+                upper_bound_km: min_rtt_ms * km_per_ms,
+                min_rtt_ms,
+            })
+        })
+        .collect::<Vec<_>>();
+
+    solve(&constraints, &[], 0.0).map(|estimate| (estimate.latitude, estimate.longitude))
+}
+
+fn effective_min_rtt_ms(measurement: &Measurement, cached_tcp_bias_ms: Option<f64>) -> Option<f64> {
+    let ping = measurement.ping.as_ref()?;
+    let min_rtt_ms = match ping.method {
+        ProbeMethod::Icmp => ping.min_ms,
+        ProbeMethod::Tcp { .. } => {
+            let bias_ms = cached_tcp_bias_ms.unwrap_or(0.0);
+            (ping.min_ms - bias_ms).max(0.05)
+        }
+    };
+    Some(min_rtt_ms)
 }
 
 fn should_replace_measurement(current: &Measurement, refined: &Measurement) -> bool {
@@ -166,6 +280,25 @@ fn should_replace_measurement(current: &Measurement, refined: &Measurement) -> b
         (Some(current), Some(next)) => next.min_ms < current.min_ms,
         (None, Some(_)) => true,
         _ => false,
+    }
+}
+
+fn merge_measurement(current: &mut Measurement, mut refined: Measurement) {
+    if should_replace_measurement(current, &refined) {
+        if current.trace.is_some() && refined.trace.is_none() {
+            refined.trace = current.trace.clone();
+        }
+        *current = refined;
+        return;
+    }
+
+    if current.trace.is_none() && refined.trace.is_some() {
+        current.trace = refined.trace.take();
+    }
+    for note in refined.notes {
+        if !current.notes.iter().any(|existing| existing == &note) {
+            current.notes.push(note);
+        }
     }
 }
 
