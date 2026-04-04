@@ -58,3 +58,9 @@ Expect results to worsen on noisy residential links, asymmetric routing, anycast
 - Linux-only today
 - active probing can be noisy on locked-down or monitored networks
 - writes a local `.etherwhere-cache` file in the working directory
+
+## GitHub Automation
+
+- repo description and topics are defined in [`.github/repo-metadata.json`](/home/location/.github/repo-metadata.json)
+- [`.github/workflows/sync-repo-metadata.yml`](/home/location/.github/workflows/sync-repo-metadata.yml) can sync them to GitHub when the repository secret `REPO_ADMIN_TOKEN` is configured
+- [`.github/workflows/release.yml`](/home/location/.github/workflows/release.yml) publishes a GitHub release for tags matching `v*`, or via manual workflow dispatch with an existing tag

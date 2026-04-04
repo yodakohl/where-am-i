@@ -1,0 +1,15 @@
+{
+  "description": "Physics-first network geolocation CLI for Ethernet-connected hosts using RTT probing, traceroute corridor hints, and posterior uncertainty.",
+  "homepage": "https://github.com/yodakohl/where-am-i",
+  "topics": [
+    "rust",
+    "cli",
+    "geolocation",
+    "network-geolocation",
+    "latency",
+    "traceroute",
+    "multilateration",
+    "ethernet",
+    "networking"
+  ]
+}
