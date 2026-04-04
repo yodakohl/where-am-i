@@ -1,5 +1,7 @@
 # where-am-i
 
+[![CI](https://github.com/yodakohl/where-am-i/actions/workflows/ci.yml/badge.svg)](https://github.com/yodakohl/where-am-i/actions/workflows/ci.yml)
+
 `where-am-i` ships the `etherwhere` Rust CLI: an experimental network geolocation tool for Ethernet-connected hosts. It estimates location from active RTT probing, traceroute corridor hints, and a posterior uncertainty model. It does not rely on server-advertised location.
 
 ## Build
