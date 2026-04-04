@@ -9,10 +9,12 @@ pub struct LocationHint {
     pub anchor: Anchor,
     pub weight: f64,
     pub source: String,
+    pub supporting_anchors: Vec<Anchor>,
 }
 
 pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
-    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)> = BTreeMap::new();
+    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)> =
+        BTreeMap::new();
 
     for measurement in measurements {
         let Some(trace) = &measurement.trace else {
@@ -35,6 +37,7 @@ pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<Location
                     &mut weights,
                     hostname,
                     hop_weight,
+                    Some(measurement.anchor),
                     format!(
                         "{} hop {} hostname={hostname}",
                         measurement.anchor.label(),
@@ -49,13 +52,15 @@ pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<Location
 }
 
 pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
-    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)> = BTreeMap::new();
+    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)> =
+        BTreeMap::new();
 
     if let Some(hostname) = local_hostname() {
         accumulate_matches(
             &mut weights,
             &hostname,
             1.5,
+            None,
             format!("local hostname={hostname}"),
         );
     }
@@ -78,6 +83,7 @@ pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> 
                         &mut weights,
                         hostname,
                         hop_weight,
+                        Some(measurement.anchor),
                         format!(
                             "{} hop {} hostname={hostname}",
                             measurement.anchor.label(),
@@ -93,22 +99,34 @@ pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> 
 }
 
 fn weights_to_hints(
-    weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>)>,
+    weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)>,
 ) -> Vec<LocationHint> {
     weights
         .into_values()
-        .map(|(anchor, weight, sources)| LocationHint {
-            anchor,
-            weight: weight.min(12.0),
-            source: sources.join(" | "),
-        })
+        .map(
+            |(anchor, weight, sources, supporting_anchor_ids)| LocationHint {
+                anchor,
+                weight: weight.min(12.0),
+                source: sources.join(" | "),
+                supporting_anchors: supporting_anchor_ids
+                    .into_iter()
+                    .filter_map(|anchor_id| {
+                        BUILTIN_ANCHORS
+                            .iter()
+                            .copied()
+                            .find(|candidate| candidate.id == anchor_id)
+                    })
+                    .collect(),
+            },
+        )
         .collect()
 }
 
 fn accumulate_matches(
-    weights: &mut BTreeMap<&'static str, (Anchor, f64, Vec<String>)>,
+    weights: &mut BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)>,
     text: &str,
     weight: f64,
+    supporting_anchor: Option<Anchor>,
     source: String,
 ) {
     let haystack = text.to_lowercase();
@@ -135,9 +153,12 @@ fn accumulate_matches(
 
         let entry = weights
             .entry(alias.id)
-            .or_insert_with(|| (anchor, 0.0, Vec::new()));
+            .or_insert_with(|| (anchor, 0.0, Vec::new(), BTreeSet::new()));
         entry.1 += weight;
         entry.2.push(source.clone());
+        if let Some(supporting_anchor) = supporting_anchor {
+            entry.3.insert(supporting_anchor.id);
+        }
     }
 }
 
@@ -520,10 +541,11 @@ mod tests {
             &mut weights,
             "core1.de-cix-fra.digitalocean.net",
             5.0,
+            None,
             "trace".to_string(),
         );
 
-        let (anchor, weight, _) = weights.get("eu-central-1").expect("hint should exist");
+        let (anchor, weight, _, _) = weights.get("eu-central-1").expect("hint should exist");
         assert_eq!(anchor.metro, "Frankfurt");
         assert!(*weight >= 5.0);
     }
@@ -535,6 +557,7 @@ mod tests {
             &mut weights,
             "router.edge.example.net",
             5.0,
+            None,
             "trace".to_string(),
         );
 
@@ -564,6 +587,7 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].anchor.id, "eu-central-1");
         assert!(hints[0].weight >= 4.0);
+        assert_eq!(hints[0].supporting_anchors[0].id, "eu-central-1");
     }
 
     #[test]
@@ -588,6 +612,7 @@ mod tests {
 
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].anchor.id, "at-vienna-1");
+        assert_eq!(hints[0].supporting_anchors[0].id, "eu-central-1");
     }
 
     #[test]
@@ -613,5 +638,6 @@ mod tests {
         assert_eq!(hints.len(), 1);
         assert_eq!(hints[0].anchor.id, "at-vienna-1");
         assert!(hints[0].weight >= 2.0);
+        assert_eq!(hints[0].supporting_anchors[0].id, "eu-central-1");
     }
 }

@@ -525,6 +525,18 @@ fn print_report(
                 );
             }
             println!("  solver score: {:.3}", estimate.score);
+            if haversine_km(
+                estimate.latitude,
+                estimate.longitude,
+                estimate.mode_latitude,
+                estimate.mode_longitude,
+            ) >= 5.0
+            {
+                println!(
+                    "  posterior mode: {:.4}, {:.4} (score {:.3})",
+                    estimate.mode_latitude, estimate.mode_longitude, estimate.mode_score
+                );
+            }
             println!(
                 "  fitted base overhead: {:.2} ms",
                 estimate.fitted_overhead_ms
@@ -537,11 +549,20 @@ fn print_report(
                 "  weighted RTT residual: {:.2} ms",
                 estimate.weighted_rmse_ms
             );
+            println!("  posterior radius: {:.1} km", estimate.posterior_radius_km);
+            println!("  stability radius: {:.1} km", estimate.stability_radius_km);
             println!(
-                "  stability radius: {:.1} km",
+                "  confidence radius: {:.1} km",
                 estimate.confidence_radius_km
             );
             println!("  max constraint overflow: {:.1} km", worst_overflow);
+            if let Some(corridor_hint) = &estimate.dominant_corridor_hint {
+                println!(
+                    "  dominant corridor hub: {} ({:.0} km)",
+                    corridor_hint.anchor.label(),
+                    corridor_hint.distance_km
+                );
+            }
             if trace_hints_enabled {
                 println!("  hop-derived hints used: {}", estimate.hints.len());
             }
