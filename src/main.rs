@@ -22,7 +22,7 @@ const DEFAULT_KM_PER_MS: f64 = 102.0;
 #[derive(Parser, Debug)]
 #[command(
     name = "etherwhere",
-    about = "Estimate host location from active network latency measurements"
+    about = "Estimate Ethernet host location from RTT probing, traceroute corridor hints, and posterior uncertainty"
 )]
 struct Cli {
     #[arg(long, default_value_t = 3)]

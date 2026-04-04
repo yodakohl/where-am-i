@@ -2,6 +2,12 @@
 name = "etherwhere"
 version = "0.1.0"
 edition = "2024"
+description = "Physics-first network geolocation CLI for Ethernet-connected hosts using RTT probing, traceroute corridor hints, and posterior uncertainty."
+readme = "README.md"
+repository = "https://github.com/yodakohl/where-am-i"
+homepage = "https://github.com/yodakohl/where-am-i"
+keywords = ["geolocation", "latency", "traceroute", "ethernet", "cli"]
+categories = ["command-line-utilities", "network-programming", "science"]
 
 [dependencies]
 anyhow = "1.0"
