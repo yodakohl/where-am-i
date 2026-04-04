@@ -402,7 +402,7 @@ fn default_route_signature() -> Option<DefaultRouteSignature> {
 
 fn tracepath_local_candidates(config: &ProbeConfig) -> Vec<(String, String)> {
     let trace_config = ProbeConfig {
-        trace_hops: config.trace_hops.min(3).max(2),
+        trace_hops: config.trace_hops.clamp(2, 3),
         ..*config
     };
     let Ok(output) = run_tracepath("1.1.1.1", &trace_config) else {
@@ -415,10 +415,10 @@ fn tracepath_local_candidates(config: &ProbeConfig) -> Vec<(String, String)> {
 
     let mut candidates = Vec::new();
     for hop in summary.hops.into_iter().take(2) {
-        if let Some(address) = hop.address {
-            if !candidates.iter().any(|(existing, _)| existing == &address) {
-                candidates.push((address, format!("tracepath hop {}", hop.hop)));
-            }
+        if let Some(address) = hop.address
+            && !candidates.iter().any(|(existing, _)| existing == &address)
+        {
+            candidates.push((address, format!("tracepath hop {}", hop.hop)));
         }
     }
 

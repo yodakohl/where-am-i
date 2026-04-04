@@ -19,6 +19,15 @@ use etherwhere::solver::{Constraint, constraints_from_measurements, haversine_km
 const CACHE_PATH: &str = ".etherwhere-cache";
 const DEFAULT_KM_PER_MS: f64 = 102.0;
 
+struct ReportContext {
+    km_per_ms: f64,
+    local_rtt_floor: Option<LocalRttFloor>,
+    shared_rtt_floor_ms: f64,
+    tcp_bias_ms: f64,
+    cached_anchor_count: usize,
+    trace_hints_enabled: bool,
+}
+
 #[derive(Parser, Debug)]
 #[command(
     name = "etherwhere",
@@ -66,7 +75,6 @@ fn main() -> Result<()> {
     let mut measurements = BUILTIN_ANCHORS
         .iter()
         .copied()
-        .into_iter()
         .map(|anchor| probe_anchor(anchor, &coarse_config, false))
         .collect::<Vec<_>>();
 
@@ -108,20 +116,20 @@ fn main() -> Result<()> {
     };
     let estimate = solve(&constraints, &hints, shared_rtt_floor_ms);
 
-    print_report(
-        &measurements,
-        &estimate,
-        cli.km_per_ms,
-        &local_rtt_floor,
+    let report = ReportContext {
+        km_per_ms: cli.km_per_ms,
+        local_rtt_floor,
         shared_rtt_floor_ms,
         tcp_bias_ms,
-        active_cache.anchor_floors.len(),
+        cached_anchor_count: active_cache.anchor_floors.len(),
         trace_hints_enabled,
-    );
+    };
+
+    print_report(&measurements, &estimate, &report);
 
     if let Some(network_fingerprint) = &network_fingerprint {
         cache.update_from_measurements(&network_fingerprint.id, &measurements);
-        cache.update_local_rtt_floor(&network_fingerprint.id, local_rtt_floor.as_ref());
+        cache.update_local_rtt_floor(&network_fingerprint.id, report.local_rtt_floor.as_ref());
         cache.update_tcp_bias(&network_fingerprint.id, tcp_bias_ms);
         let _ = cache.save(cache_path);
     }
@@ -458,20 +466,15 @@ fn apply_tcp_bias_correction(measurements: &mut [Measurement], tcp_bias_ms: f64)
 fn print_report(
     measurements: &[Measurement],
     estimate: &Option<etherwhere::solver::Estimate>,
-    km_per_ms: f64,
-    local_rtt_floor: &Option<LocalRttFloor>,
-    shared_rtt_floor_ms: f64,
-    tcp_bias_ms: f64,
-    cached_anchor_count: usize,
-    trace_hints_enabled: bool,
+    report: &ReportContext,
 ) {
-    println!("Model: RTT upper bound using {km_per_ms:.1} km/ms");
+    println!("Model: RTT upper bound using {:.1} km/ms", report.km_per_ms);
     println!(
         "Limits: anycast, asymmetric routing, and metro-level anchor placement dominate error"
     );
     println!();
 
-    if let Some(local_rtt_floor) = local_rtt_floor {
+    if let Some(local_rtt_floor) = &report.local_rtt_floor {
         println!("Calibration:");
         println!(
             "  local RTT floor: {:.2} ms via {} ({})",
@@ -479,13 +482,19 @@ fn print_report(
         );
         println!(
             "  shared floor used in bounds: {:.2} ms",
-            shared_rtt_floor_ms
+            report.shared_rtt_floor_ms
         );
-        if tcp_bias_ms > 0.0 {
-            println!("  TCP handshake bias correction: {:.2} ms", tcp_bias_ms);
+        if report.tcp_bias_ms > 0.0 {
+            println!(
+                "  TCP handshake bias correction: {:.2} ms",
+                report.tcp_bias_ms
+            );
         }
-        if cached_anchor_count > 0 {
-            println!("  historical anchor floors loaded: {cached_anchor_count}");
+        if report.cached_anchor_count > 0 {
+            println!(
+                "  historical anchor floors loaded: {}",
+                report.cached_anchor_count
+            );
         }
         println!();
     }
@@ -563,7 +572,7 @@ fn print_report(
                     corridor_hint.distance_km
                 );
             }
-            if trace_hints_enabled {
+            if report.trace_hints_enabled {
                 println!("  hop-derived hints used: {}", estimate.hints.len());
             }
             if estimate.constraints.len() < 3 {
@@ -571,7 +580,7 @@ fn print_report(
             }
             println!();
 
-            if trace_hints_enabled && !estimate.hints.is_empty() {
+            if report.trace_hints_enabled && !estimate.hints.is_empty() {
                 println!("Hints:");
                 for hint in &estimate.hints {
                     println!(
@@ -595,7 +604,7 @@ fn print_report(
     for measurement in measurements {
         match &measurement.ping {
             Some(ping) => {
-                let upper_bound_km = ping.upper_bound_km(km_per_ms);
+                let upper_bound_km = ping.upper_bound_km(report.km_per_ms);
                 println!(
                     "  {} [{}] {} {} min={:.2}ms avg={:.2}ms max={:.2}ms mdev={:.2}ms <= {:.0} km",
                     measurement.anchor.label(),

@@ -51,6 +51,13 @@ pub struct Estimate {
     pub dominant_corridor_hint: Option<EvaluatedHint>,
 }
 
+#[derive(Debug, Clone, Copy)]
+struct Radii {
+    confidence_km: f64,
+    posterior_km: f64,
+    stability_km: f64,
+}
+
 pub fn constraints_from_measurements(
     measurements: &[Measurement],
     km_per_ms: f64,
@@ -103,15 +110,18 @@ pub fn solve(
     let confidence_radius_km = stability_radius_km.max(posterior.radius_km);
     let dominant_corridor_hint =
         dominant_corridor_hint(posterior.latitude, posterior.longitude, constraints, hints);
+    let radii = Radii {
+        confidence_km: confidence_radius_km,
+        posterior_km: posterior.radius_km,
+        stability_km: stability_radius_km,
+    };
 
     Some(build_estimate(
         center,
         mode,
         constraints,
         hints,
-        confidence_radius_km,
-        posterior.radius_km,
-        stability_radius_km,
+        radii,
         dominant_corridor_hint,
     ))
 }
@@ -150,9 +160,7 @@ fn build_estimate(
     mode: Candidate,
     constraints: &[Constraint],
     hints: &[LocationHint],
-    confidence_radius_km: f64,
-    posterior_radius_km: f64,
-    stability_radius_km: f64,
+    radii: Radii,
     dominant_corridor_hint: Option<EvaluatedHint>,
 ) -> Estimate {
     Estimate {
@@ -165,9 +173,9 @@ fn build_estimate(
         fitted_overhead_ms: best.fit.overhead_ms,
         fitted_km_per_ms: 1.0 / best.fit.ms_per_km,
         weighted_rmse_ms: best.fit.weighted_rmse_ms,
-        confidence_radius_km,
-        posterior_radius_km,
-        stability_radius_km,
+        confidence_radius_km: radii.confidence_km,
+        posterior_radius_km: radii.posterior_km,
+        stability_radius_km: radii.stability_km,
         constraints: constraints
             .iter()
             .map(|constraint| {

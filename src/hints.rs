@@ -4,6 +4,10 @@ use std::process::Command;
 use crate::anchors::{Anchor, BUILTIN_ANCHORS};
 use crate::probe::Measurement;
 
+type SupportingAnchorIds = BTreeSet<&'static str>;
+type HintAccumulator = (Anchor, f64, Vec<String>, SupportingAnchorIds);
+type HintWeights = BTreeMap<&'static str, HintAccumulator>;
+
 #[derive(Debug, Clone)]
 pub struct LocationHint {
     pub anchor: Anchor,
@@ -13,8 +17,7 @@ pub struct LocationHint {
 }
 
 pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
-    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)> =
-        BTreeMap::new();
+    let mut weights: HintWeights = BTreeMap::new();
 
     for measurement in measurements {
         let Some(trace) = &measurement.trace else {
@@ -52,8 +55,7 @@ pub fn derive_trace_location_hints(measurements: &[Measurement]) -> Vec<Location
 }
 
 pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> {
-    let mut weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)> =
-        BTreeMap::new();
+    let mut weights: HintWeights = BTreeMap::new();
 
     if let Some(hostname) = local_hostname() {
         accumulate_matches(
@@ -98,9 +100,7 @@ pub fn derive_location_hints(measurements: &[Measurement]) -> Vec<LocationHint> 
     weights_to_hints(weights)
 }
 
-fn weights_to_hints(
-    weights: BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)>,
-) -> Vec<LocationHint> {
+fn weights_to_hints(weights: HintWeights) -> Vec<LocationHint> {
     weights
         .into_values()
         .map(
@@ -123,7 +123,7 @@ fn weights_to_hints(
 }
 
 fn accumulate_matches(
-    weights: &mut BTreeMap<&'static str, (Anchor, f64, Vec<String>, BTreeSet<&'static str>)>,
+    weights: &mut HintWeights,
     text: &str,
     weight: f64,
     supporting_anchor: Option<Anchor>,
