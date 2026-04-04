@@ -1,8 +1,6 @@
 # where-am-i
 
-`where-am-i` ships the `etherwhere` Rust CLI: a physics-first network geolocation tool for Ethernet-connected hosts. It uses active RTT probing, traceroute corridor hints, and posterior uncertainty. It does not trust server-advertised location.
-
-Keywords: Rust, CLI, geolocation, network latency, RTT, traceroute, Ethernet, multilateration.
+`where-am-i` ships the `etherwhere` Rust CLI: an experimental network geolocation tool for Ethernet-connected hosts. It estimates location from active RTT probing, traceroute corridor hints, and a posterior uncertainty model. It does not rely on server-advertised location.
 
 ## Build
 
@@ -31,36 +29,30 @@ cargo run --release -- --count 3 --rounds 2 --trace-hints
 - probes a built-in global anchor set with ICMP and TCP fallback
 - estimates local access delay and decays cached timing floors over time
 - extracts corridor hints from trace hostnames such as regional IX or metro codes
-- reports a posterior center, posterior mode, and confidence radius
+- reports a posterior center, posterior mode, and uncertainty radius
 
 ## Read The Output
 
 - `latitude` / `longitude`: posterior center
 - `posterior mode`: best local fit when it differs materially from the center
-- `confidence radius`: the number to watch for uncertainty
+- `confidence radius`: the main uncertainty number to watch
 - `dominant corridor hub`: likely transit hub, not the machine's exact city
 - `nearest bundled metro`: nearest anchor in the built-in set, not necessarily the estimate itself
 
-## Ballpark Results
+## Expectations
 
-This is metro-to-regional geolocation, not GPS.
+This is not GPS. It is an active network measurement tool, so accuracy depends heavily on access-network overhead, anchor geometry, routing asymmetry, and whether traceroute reveals useful corridor information.
 
-Recent measured and regression-backed results:
+Reasonable expectations:
 
-- low-overhead Frankfurt-style metro case: often single-digit kilometers, roughly `0-5 km` in repeated local measurements
-- Salzburg / Vienna-corridor live run: about `24-36 km` from Salzburg, with `92.8 km` posterior radius and `187.2 km` confidence radius
-- harder high-overhead Austria replay: regression target is under `170 km` error while keeping uncertainty broad instead of faking precision
+- favorable metro-connected hosts with nearby anchors and clean routes can land within a few to a few dozen kilometers
+- noisier residential or high-overhead links can drift to regional-scale error, often tens to hundreds of kilometers
+- a large `confidence radius` means the estimate should be treated as a broad region, not a precise point
 
-Expect results to worsen on noisy residential links, asymmetric routing, anycast-heavy paths, or sparse anchor geometry. Runs with `--trace` or `--trace-hints` are usually slower but can improve corridor inference.
+Runs with `--trace` or `--trace-hints` are usually slower but can improve corridor inference.
 
 ## Notes
 
 - Linux-only today
 - active probing can be noisy on locked-down or monitored networks
 - writes a local `.etherwhere-cache` file in the working directory
-
-## GitHub Automation
-
-- repo description and topics are defined in [`.github/repo-metadata.json`](/home/location/.github/repo-metadata.json)
-- [`.github/workflows/sync-repo-metadata.yml`](/home/location/.github/workflows/sync-repo-metadata.yml) can sync them to GitHub when the repository secret `REPO_ADMIN_TOKEN` is configured
-- [`.github/workflows/release.yml`](/home/location/.github/workflows/release.yml) publishes a GitHub release for tags matching `v*`, or via manual workflow dispatch with an existing tag
