@@ -16,25 +16,42 @@ permissions:
 
 jobs:
   release:
+    timeout-minutes: 20
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Select release tag
         id: tag
+        env:
+          INPUT_TAG: ${{ inputs.tag }}
+          PUSH_TAG: ${{ github.ref_name }}
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            git fetch --tags origin
-            git rev-parse "refs/tags/${{ inputs.tag }}" >/dev/null
-            git checkout "refs/tags/${{ inputs.tag }}"
-            echo "tag=${{ inputs.tag }}" >> "$GITHUB_OUTPUT"
+            TAG="$INPUT_TAG"
           else
-            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+            TAG="$PUSH_TAG"
           fi
 
-      - uses: dtolnay/rust-toolchain@stable
+          case "$TAG" in
+            v[0-9A-Za-z._-]* ) ;;
+            * )
+              echo "invalid release tag: $TAG" >&2
+              exit 1
+              ;;
+          esac
+
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            git fetch --tags origin
+            git rev-parse "refs/tags/$TAG" >/dev/null
+            git checkout "refs/tags/$TAG"
+          fi
+          printf 'tag=%s\n' "$TAG" >> "$GITHUB_OUTPUT"
+
+      - uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable
 
       - name: Build release binary
         run: cargo build --release
@@ -46,7 +63,7 @@ jobs:
           sha256sum dist/etherwhere-linux-x86_64 > dist/etherwhere-linux-x86_64.sha256
 
       - name: Publish GitHub release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@153bb8e04406b158c6c84fc1615b65b24149a1fe # v2
         with:
           tag_name: ${{ steps.tag.outputs.tag }}
           generate_release_notes: true

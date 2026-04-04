@@ -1,5 +1,9 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::fs::OpenOptions;
+use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -41,15 +45,32 @@ impl ProbeCache {
             return Ok(Self::default());
         }
 
+        if fs::symlink_metadata(path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            anyhow::bail!("refusing to read cache through symlink: {}", path.display());
+        }
+
         let content =
             fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
         Ok(Self::parse(&content))
     }
 
     pub fn save(&self, path: &Path) -> Result<()> {
-        let tmp_path = path.with_extension("tmp");
-        fs::write(&tmp_path, self.render())
+        let tmp_path = unique_cache_temp_path(path);
+        let mut tmp = OpenOptions::new();
+        tmp.write(true).create_new(true);
+        #[cfg(unix)]
+        tmp.mode(0o600);
+
+        let mut file = tmp
+            .open(&tmp_path)
+            .with_context(|| format!("creating {}", tmp_path.display()))?;
+        file.write_all(self.render().as_bytes())
             .with_context(|| format!("writing {}", tmp_path.display()))?;
+        file.sync_all()
+            .with_context(|| format!("syncing {}", tmp_path.display()))?;
         fs::rename(&tmp_path, path)
             .with_context(|| format!("renaming {} to {}", tmp_path.display(), path.display()))
     }
@@ -305,6 +326,19 @@ impl ProbeCache {
     fn profile_mut(&mut self, fingerprint: &str) -> &mut CacheProfile {
         self.profiles.entry(fingerprint.to_string()).or_default()
     }
+}
+
+fn unique_cache_temp_path(path: &Path) -> std::path::PathBuf {
+    let base = path
+        .file_name()
+        .and_then(|value| value.to_str())
+        .unwrap_or(".etherwhere-cache");
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    parent.join(format!("{base}.tmp.{nonce}.{}", std::process::id()))
 }
 
 impl CacheProfile {
