@@ -78,6 +78,16 @@ Reasonable expectations:
 
 Runs with `--trace` or `--trace-hints` are usually slower but can improve corridor inference.
 
+## Related reading
+
+If you use network measurements as one input into a larger alerting or
+verification workflow, these two PushMe guides are the closest match:
+
+- [How to verify alerts with primary sources](https://pushme.site/blog/primary-sources-not-recycled-alerts)
+  for checking direct evidence before routing an alert onward
+- [Real-time alerting checklist for small teams](https://pushme.site/blog/real-time-alerting-checklist)
+  for keeping a measurement-driven alert stack usable once it leaves the lab
+
 ## Notes
 
 - Linux-only today
